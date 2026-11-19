@@ -30,6 +30,12 @@
   form .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
   label { font-size: .85rem; }
   code { background: #8882; padding: 1px 5px; border-radius: 4px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: .8rem; }
+  .badge.on { background: #2e7d3233; border: 1px solid #2e7d32; }
+  .badge.off { background: #8882; border: 1px solid #8888; }
+  .badge.err { background: #c6282833; border: 1px solid #c62828; }
+  .lane { border: 1px dashed #8886; border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
+  .lanes { display: flex; gap: 12px; flex-wrap: wrap; }
 </style>
 </head>
 <body>
@@ -42,11 +48,20 @@
   <div class="card"><div class="label">接收器 B</div><div class="big" style="font-size:1rem">{{ receivers["B"] }}</div></div>
   <div class="card"><div class="label">会话空闲超时</div><div class="big" style="font-size:1rem">{{ idle_timeout }} s</div></div>
   <div class="card"><div class="label">终端发送地址（UDP）</div><div class="big" style="font-size:1rem">本机 :{{ udp_listen_port }}</div></div>
+  <div class="card"><div class="label">固定源端口模式</div>
+    <div id="fixedBadge" class="big" style="font-size:1rem">
+      {% if fixed.active %}<span class="badge on">启用 · UDP {{ fixed.port }}</span>
+      {% elif fixed.error %}<span class="badge err">启用失败</span>
+      {% else %}<span class="badge off">关闭</span>{% endif %}
+    </div></div>
 </div>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
   {% for cat, msg in messages %}<div class="flash {{ cat }}">{{ msg }}</div>{% endfor %}
 {% endwith %}
+{% if fixed.error %}
+<div class="flash error">{{ fixed.error }}</div>
+{% endif %}
 
 <section>
   <h2>切换目标接收器</h2>
@@ -58,27 +73,71 @@
 </section>
 
 <section>
-  <h2>发送试传报文</h2>
-  <form method="post" action="{{ url_for('test') }}">
-    <div class="row">
-      <label>报文 <input name="payload" value="PING" size="24"></label>
-      <label>回包延迟(秒) <input name="delay" type="number" min="0" step="0.5" value="0" style="width:70px"></label>
-      <label>等待超时(秒) <input name="wait" type="number" min="1" max="60" value="10" style="width:70px"></label>
-      <label>固定客户端端口 <input name="client_port" type="number" min="1" max="65535" placeholder="留空=随机" style="width:110px"></label>
-      <button type="submit">发送</button>
-    </div>
-    <p class="hint">不填端口时每次试传都用新端口（总是新会话）。填同一端口可观察：空闲 {{ idle_timeout }} 秒内复用旧会话（仍走旧接收器）；超时后同端口重建会话，也收不到旧会话迟到的回包。</p>
-  </form>
-  {% if last_test %}
-  <div class="card" style="margin-top:10px">
-    <div class="label">最近一次试传（{{ last_test.time }}）</div>
-    <div>客户端 <code>{{ last_test.client }}</code> → 实际去向接收器
-      <b>{{ last_test.receiver or "?" }}</b>，报文 <code>{{ last_test.payload }}</code></div>
-    {% if last_test.ok %}
-      <div class="result-ok">收到回包：<code>{{ last_test.reply }}</code>（RTT {{ last_test.rtt }}s）</div>
+  <h2>固定源端口模式</h2>
+  <form method="post" action="{{ url_for('mode') }}">
+    {% if not fixed.requested %}
+      <button type="submit" name="action" value="enable">启用（UDP {{ fixed.port }}）</button>
     {% else %}
-      <div class="result-err">{{ last_test.error }}</div>
+      <button type="submit" name="action" value="disable">关闭，恢复每会话独立端口</button>
     {% endif %}
+  </form>
+  <p class="hint">
+    启用后，代理无论上游是 A 还是 B，都只从 UDP <b>{{ fixed.port }}</b> 发送；
+    接收器只接收来自约定端口的报文。单条终端报文上限 {{ fixed.max_forward_size }} 字节，超限丢弃并记日志。
+    固定端口被占用时启用失败并在上方报错，代理不会换端口继续转发。
+    {% if fixed.requested and not fixed.active %}当前固定端口不可用，报文不会被转发。{% endif %}
+    切换开关会重建全部会话；会话过期或代理重启后，旧回包即使到达也会因标识失效被丢弃。
+  </p>
+</section>
+
+<section>
+  <h2>并行试传（两路实际 UDP）</h2>
+  <form method="post" action="{{ url_for('test') }}">
+    <div class="lanes">
+      <div class="lane">
+        <div class="row"><b>第 1 路</b>
+          <label>报文 <input name="payload" value="PING" size="18"></label>
+          <label>回包延迟(秒) <input name="delay" type="number" min="0" step="0.5" value="0" style="width:70px"></label>
+          <label>客户端端口 <input name="client_port" type="number" min="1" max="65535" placeholder="留空=随机" style="width:100px"></label>
+        </div>
+      </div>
+      <div class="lane">
+        <div class="row"><b>第 2 路</b>
+          <label>报文 <input name="payload2" value="PING2" size="18"></label>
+          <label>回包延迟(秒) <input name="delay2" type="number" min="0" step="0.5" value="1" style="width:70px"></label>
+          <label>客户端端口 <input name="client_port2" type="number" min="1" max="65535" placeholder="留空=随机" style="width:100px"></label>
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <label>等待超时(秒) <input name="wait" type="number" min="1" max="60" value="10" style="width:70px"></label>
+      <button type="submit">并行发送</button>
+    </div>
+    <p class="hint">两路报文同时从不同客户端端口发出（第 2 路报文留空则只发第 1 路）；各自可设置回包延迟。
+      不填客户端端口时每次都新建会话（走当前目标）；填同一端口可观察空闲 {{ idle_timeout }} 秒内复用旧会话。
+      固定端口模式下两路共用同一个源端口，且即使报文相同、回包乱序，也按原会话交付。</p>
+  </form>
+  {% if last_tests %}
+  <div style="margin-top:10px">
+    {% for lt in last_tests %}
+    <div class="card" style="margin-top:8px">
+      <div class="label">第 {{ lt.lane }} 路试传（{{ lt.time }}）</div>
+      <div>客户端 <code>{{ lt.client }}</code> → 实际去向接收器
+        <b>{{ lt.receiver or "?" }}</b>{% if lt.session_id %}，会话 {{ lt.session_id }}{% endif %}
+        {% if lt.mode == "fixed" %}，模式 <b>固定端口</b>{% endif %}，
+        报文 <code>{{ lt.payload }}</code></div>
+      {% if lt.mode == "fixed" %}
+      <div>接收器观测到的源端口：<b>{{ lt.observed_source_port if lt.observed_source_port is not none else "?" }}</b></div>
+      {% else %}
+      <div>转发源端口（该会话独立上游端口）：<b>{{ lt.forward_source_port if lt.forward_source_port is not none else "?" }}</b></div>
+      {% endif %}
+      {% if lt.ok %}
+        <div class="result-ok">收到回包：<code>{{ lt.reply }}</code>（RTT {{ lt.rtt }}s）</div>
+      {% else %}
+        <div class="result-err">{{ lt.error }}</div>
+      {% endif %}
+    </div>
+    {% endfor %}
   </div>
   {% endif %}
 </section>
@@ -86,8 +145,8 @@
 <section>
   <h2>活动会话 <span class="hint">（每 2 秒自动刷新）</span></h2>
   <table>
-    <thead><tr><th>ID</th><th>客户端</th><th>固定接收器</th><th>上游端口</th><th>状态</th><th>空闲(s)</th><th>存活(s)</th></tr></thead>
-    <tbody id="sessions"><tr><td colspan="7">加载中…</td></tr></tbody>
+    <thead><tr><th>ID</th><th>客户端</th><th>固定接收器</th><th>模式</th><th>发送源端口</th><th>状态</th><th>空闲(s)</th><th>存活(s)</th></tr></thead>
+    <tbody id="sessions"><tr><td colspan="8">加载中…</td></tr></tbody>
   </table>
 </section>
 
@@ -105,11 +164,21 @@ async function refresh() {
   try {
     const s = await (await fetch('/api/state')).json();
     document.getElementById('target').textContent = s.target;
+    const f = s.fixed;
+    const badge = document.getElementById('fixedBadge');
+    if (f.active) {
+      badge.innerHTML = '<span class="badge on">启用 · UDP ' + f.port + '</span>';
+    } else if (f.error) {
+      badge.innerHTML = '<span class="badge err" title="' + esc(f.error) + '">启用失败</span>';
+    } else {
+      badge.innerHTML = '<span class="badge off">关闭</span>';
+    }
     const ss = s.sessions.map(x =>
       `<tr><td>${x.id}</td><td>${esc(x.client)}</td><td><b>${esc(x.receiver)}</b></td>` +
-      `<td>${x.upstream_port ?? ''}</td><td>${esc(x.state)}</td><td>${x.idle}</td><td>${x.age}</td></tr>`);
+      `<td>${esc(x.mode)}</td><td>${x.source_port ?? ''}</td><td>${esc(x.state)}</td>` +
+      `<td>${x.idle}</td><td>${x.age}</td></tr>`);
     document.getElementById('sessions').innerHTML =
-      ss.join('') || '<tr><td colspan="7">（无活动会话）</td></tr>';
+      ss.join('') || '<tr><td colspan="8">（无活动会话）</td></tr>';
     const ms = s.messages.map(m =>
       `<tr><td>${m.id}</td><td>${esc(m.ts)}</td><td>${esc(m.client)}</td><td>${m.session_id || ''}</td>` +
       `<td>${esc(m.direction)}</td><td>${esc(m.receiver)}</td><td>${esc(m.payload)}</td><td>${esc(m.note)}</td></tr>`);

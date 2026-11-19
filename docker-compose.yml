@@ -6,6 +6,8 @@ services:
       RECEIVER_NAME: A
       LISTEN_PORT: "9001"
       REPLY_DELAY: "0"          # 默认回包延迟（秒）；报文 "DELAY:<秒>:" 可单次覆盖
+      # 只接收来自代理固定源端口的报文；留空则恢复原来的"不校验来源端口"。
+      ALLOW_SOURCE_PORT: "${ALLOW_SOURCE_PORT-9500}"
     networks: [telemetry]
 
   receiver-b:
@@ -15,6 +17,7 @@ services:
       RECEIVER_NAME: B
       LISTEN_PORT: "9001"
       REPLY_DELAY: "0"
+      ALLOW_SOURCE_PORT: "${ALLOW_SOURCE_PORT-9500}"
     networks: [telemetry]
 
   proxy:
@@ -28,11 +31,16 @@ services:
       RECEIVER_A_PORT: "9001"
       RECEIVER_B_HOST: receiver-b
       RECEIVER_B_PORT: "9001"
-      DB_PATH: /data/proxy.db            # 目标接收器持久化（重启保留）
+      DB_PATH: /data/proxy.db            # 目标接收器/固定端口模式开关持久化（重启保留）
+      # 固定源端口模式：首次启动时的默认状态，之后以网页开关（落库）为准。
+      FIXED_SOURCE_PORT_ENABLED: "${FIXED_SOURCE_PORT_ENABLED-1}"
+      FIXED_SOURCE_PORT: "${FIXED_SOURCE_PORT-9500}"   # 代理对 A/B 统一的 UDP 源端口
+      MAX_FORWARD_SIZE: "1400"           # 固定端口模式下单条终端报文上限（字节）
       # UPSTREAM_PORT_COOLDOWN: "30"     # 上游端口冷却，须大于最大回包延迟
     ports:
       - "9000:9000/udp"                  # 遥测终端发往这里
       - "8080:8080"                      # 操作网页
+      # 固定源端口 9500 只在 compose 网络内使用，无需映射到宿主机
     volumes:
       - proxy-data:/data
     depends_on:
